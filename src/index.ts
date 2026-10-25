@@ -190,7 +190,10 @@ server.tool(
       "setCompositionProperties",
       "duplicateLayer",
       "deleteLayer",
-      "setLayerMask"
+      "setLayerMask",
+      "importFile",
+      "duplicateComp",
+      "renderComp"
     ];
     
     if (!allowedScripts.includes(script)) {
@@ -358,14 +361,17 @@ Available scripts:
 - listCompositions: List all compositions in the project
 - getLayerInfo: Information about layers in the active composition
 - createComposition: Create a new composition
-- createTextLayer: Create a new text layer
+- createTextLayer: Create a new text layer (optional name)
 - createShapeLayer: Create a new shape layer
 - createSolidLayer: Create a new solid layer
 - setLayerProperties: Set properties for a layer
 - setLayerKeyframe: Set a keyframe for a layer property
-- setLayerExpression: Set an expression for a layer property
+- setLayerExpression: Set an expression for a layer property (propertyName may be a path, e.g. "Effects>Transform>Position")
 - applyEffect: Apply an effect to a layer
 - applyEffectTemplate: Apply a predefined effect template to a layer
+- importFile: Import a file (path), optionally add it to a comp (compName, layerName, toBottom)
+- duplicateComp: Duplicate a comp (compName, newName)
+- renderComp: Render one comp (compName, outputPath, outputModule = "High Quality" or "High Quality with Alpha")
 
 Effect Templates:
 - gaussian-blur: Simple Gaussian blur effect

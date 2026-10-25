@@ -66,6 +66,7 @@ function createTextLayer(args) {
         else if (alignment === "center") { textDocument.justification = ParagraphJustification.CENTER_JUSTIFY; } 
         else if (alignment === "right") { textDocument.justification = ParagraphJustification.RIGHT_JUSTIFY; }
         textProp.setValue(textDocument);
+        if (args.name) { textLayer.name = args.name; }
         textLayer.property("Position").setValue(position);
         textLayer.startTime = startTime;
         if (duration > 0) { textLayer.outPoint = startTime + duration; }
@@ -110,6 +111,7 @@ function createShapeLayer(args) {
         if (shapeType === "rectangle") {
             shapePathProperty = groupContents.addProperty("ADBE Vector Shape - Rect");
             shapePathProperty.property("Size").setValue(size);
+            if (args.roundness) { shapePathProperty.property("Roundness").setValue(args.roundness); }
         } else if (shapeType === "ellipse") {
             shapePathProperty = groupContents.addProperty("ADBE Vector Shape - Ellipse");
             shapePathProperty.property("Size").setValue(size);
@@ -120,9 +122,11 @@ function createShapeLayer(args) {
             shapePathProperty.property("Outer Radius").setValue(size[0] / 2);
             if (shapeType === "star") { shapePathProperty.property("Inner Radius").setValue(size[0] / 3); }
         }
-        var fill = groupContents.addProperty("ADBE Vector Graphic - Fill");
-        fill.property("Color").setValue(fillColor);
-        fill.property("Opacity").setValue(100);
+        if (args.fillColor !== null) { // pass fillColor: null for an outline-only shape
+            var fill = groupContents.addProperty("ADBE Vector Graphic - Fill");
+            fill.property("Color").setValue(fillColor);
+            fill.property("Opacity").setValue(100);
+        }
         if (strokeWidth > 0) {
             var stroke = groupContents.addProperty("ADBE Vector Graphic - Stroke");
             stroke.property("Color").setValue(strokeColor);
@@ -236,6 +240,81 @@ function duplicateLayer(args) {
             original: { name: layer.name, index: layer.index },
             duplicate: { name: newLayer.name, index: newLayer.index }
         }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- Project helpers for import / duplicate / render ---
+function findCompByName(compName) {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var item = app.project.item(i);
+        if (item instanceof CompItem && item.name === compName) { return item; }
+    }
+    throw new Error("No composition found with name '" + compName + "'");
+}
+
+function projectIndexOf(target) {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        if (app.project.item(i) === target) { return i; }
+    }
+    return -1;
+}
+
+// --- importFile: import a file (reusing it if already in the project), optionally add it to a comp ---
+function importFile(args) {
+    try {
+        var file = new File(args.path);
+        if (!file.exists) { throw new Error("File not found: " + args.path); }
+        var footage = null;
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof FootageItem && item.file && item.file.fsName === file.fsName) { footage = item; break; }
+        }
+        if (!footage) { footage = app.project.importFile(new ImportOptions(file)); }
+        var result = { status: "success", item: { name: footage.name, id: footage.id, projectIndex: projectIndexOf(footage), width: footage.width, height: footage.height } };
+        if (args.compName) {
+            var comp = findCompByName(args.compName);
+            var layer = comp.layers.add(footage);
+            if (args.layerName) { layer.name = args.layerName; }
+            if (args.toBottom) { layer.moveToEnd(); }
+            result.layer = { name: layer.name, index: layer.index };
+        }
+        return JSON.stringify(result, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- duplicateComp: duplicate a comp (layers, expressions, keyframes) under a new name ---
+function duplicateComp(args) {
+    try {
+        var comp = findCompByName(args.compName);
+        var copy = comp.duplicate();
+        if (args.newName) { copy.name = args.newName; }
+        return JSON.stringify({ status: "success", composition: { name: copy.name, id: copy.id, projectIndex: projectIndexOf(copy) } }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- renderComp: queue a comp and render only it. Blocks After Effects until the render finishes. ---
+function renderComp(args) {
+    try {
+        var comp = findCompByName(args.compName);
+        if (!args.outputPath) { throw new Error("outputPath is required"); }
+        var template = args.outputModule || "High Quality"; // "High Quality with Alpha" for ProRes 4444
+        var rq = app.project.renderQueue;
+        for (var i = 1; i <= rq.numItems; i++) {
+            if (rq.item(i).status === RQItemStatus.QUEUED) { rq.item(i).render = false; }
+        }
+        var rqItem = rq.items.add(comp);
+        var om = rqItem.outputModule(1);
+        try { om.applyTemplate(template); }
+        catch (e) { throw new Error("Output module template '" + template + "' not found. Available: " + om.templates.join(", ")); }
+        om.file = new File(args.outputPath);
+        rq.render();
+        return JSON.stringify({ status: "success", message: "Rendered " + comp.name, output: om.file.fsName, renderStatus: rqItem.status === RQItemStatus.DONE ? "done" : String(rqItem.status) }, null, 2);
     } catch (error) {
         return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
     }
@@ -740,6 +819,15 @@ function batchSetLayerProperties(args) {
     }
 }
 
+// Walk a ">"-separated path of property names or match names, e.g. "Effects>Transform>Position"
+// or "Contents>Group 1>Contents>Rectangle Path 1>Size". Returns null if any step is missing.
+function resolvePropertyPath(layer, path) {
+    var prop = layer;
+    var parts = path.split(">");
+    for (var i = 0; i < parts.length && prop; i++) { prop = prop.property(parts[i]); }
+    return prop || null;
+}
+
 /**
  * Sets a keyframe for a specific property on a layer.
  * Indices are 1-based for After Effects collections.
@@ -767,7 +855,7 @@ function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, va
              return JSON.stringify({ success: false, message: "Transform properties not found for layer '" + layer.name + "' (type: " + layer.matchName + ")." });
         }
 
-        var property = transformGroup.property(propertyName);
+        var property = propertyName.indexOf(">") >= 0 ? resolvePropertyPath(layer, propertyName) : transformGroup.property(propertyName);
         if (!property) {
             // Check other common property groups if not in Transform
              if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
@@ -828,7 +916,8 @@ function setLayerExpression(compIndex, layerIndex, propertyName, expressionStrin
              // return JSON.stringify({ success: false, message: "Transform properties not found for layer '" + layer.name + "' (type: " + layer.matchName + ")." });
         }
 
-        var property = transformGroup ? transformGroup.property(propertyName) : null;
+        var property = propertyName.indexOf(">") >= 0 ? resolvePropertyPath(layer, propertyName)
+            : (transformGroup ? transformGroup.property(propertyName) : null);
          if (!property) {
             // Check other common property groups if not in Transform
              if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
@@ -1594,6 +1683,15 @@ function executeCommand(command, args) {
                 logToPanel("Calling setLayerMask function...");
                 result = setLayerMask(args);
                 logToPanel("Returned from setLayerMask.");
+                break;
+            case "importFile":
+                result = importFile(args);
+                break;
+            case "duplicateComp":
+                result = duplicateComp(args);
+                break;
+            case "renderComp":
+                result = renderComp(args);
                 break;
             default:
                 result = JSON.stringify({ error: "Unknown command: " + command });
